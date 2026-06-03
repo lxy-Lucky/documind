@@ -102,11 +102,15 @@ def _merge(cells_data: dict, vl_data: dict) -> tuple[dict, dict[str, str]]:
         doc["version"] = version
 
     color_map: dict[str, str] = {}
-    for entry in vl_data.get("color_legend") or []:
-        c = entry.get("color_hex")
-        lbl = entry.get("label")
-        if c and lbl:
-            color_map[c.upper()] = lbl
+    legend = vl_data.get("color_legend") if isinstance(vl_data, dict) else None
+    if isinstance(legend, list):
+        for entry in legend:
+            if not isinstance(entry, dict):
+                continue
+            c = entry.get("color_hex")
+            lbl = entry.get("label")
+            if c and lbl:
+                color_map[str(c).upper()] = str(lbl)
 
     return doc, color_map
 

@@ -80,11 +80,17 @@ class GenericParser(BaseSheetParser):
             structured = await _vl_structure(ctx.screenshot_path)
 
         chunks: list[ParsedChunk] = []
-        if structured and structured.get("sections"):
+        sections = (structured or {}).get("sections") if isinstance(structured, dict) else None
+        if isinstance(sections, list) and sections:
             order = 0
-            for sec in structured["sections"]:
-                title = sec.get("title") or f"{snap.name} 区块 {order + 1}"
-                content = sec.get("content") or ""
+            for sec in sections:
+                if isinstance(sec, dict):
+                    title = str(sec.get("title") or f"{snap.name} 区块 {order + 1}")
+                    content = str(sec.get("content") or "")
+                else:
+                    # Tolerate plain-string sections from VL
+                    title = f"{snap.name} 区块 {order + 1}"
+                    content = str(sec)
                 if not content:
                     continue
                 md = f"### {snap.name} — {title}\n\n{content}"
@@ -94,7 +100,7 @@ class GenericParser(BaseSheetParser):
                     metadata={
                         "kind": "generic_section",
                         "sheet": snap.name,
-                        "summary": structured.get("summary"),
+                        "summary": (structured.get("summary") if isinstance(structured, dict) else None),
                         "jira_tags": doc_jiras,
                     },
                     hierarchy_path=f"{snap.name} > {title}",

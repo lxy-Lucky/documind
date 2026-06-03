@@ -82,29 +82,67 @@ async def _describe_image(image_path) -> dict:
         return {}
 
 
-def _render_description_md(desc: dict) -> str:
-    if not desc:
+def _as_str(x) -> str:
+    """Tolerant string coercion for VL outputs that sometimes nest dicts
+    inside what should be string fields."""
+    if x is None:
+        return ""
+    if isinstance(x, str):
+        return x
+    if isinstance(x, (int, float, bool)):
+        return str(x)
+    if isinstance(x, dict):
+        # Common: {"text": "..."} or {"value": "..."}
+        for k in ("text", "value", "name", "description", "title"):
+            if k in x:
+                return _as_str(x[k])
+        return json.dumps(x, ensure_ascii=False)
+    if isinstance(x, list):
+        return ", ".join(_as_str(e) for e in x)
+    return str(x)
+
+
+def _render_description_md(desc) -> str:
+    """Defensive renderer: VL output may have wrong types per field.
+    Any item that isn't a dict where we expect one is rendered as a
+    plain string."""
+    if not isinstance(desc, dict) or not desc:
         return "_(画面描述生成失败)_"
     parts: list[str] = []
-    if t := desc.get("screen_title"):
+    if t := _as_str(desc.get("screen_title")):
         parts.append(f"**画面标题**: {t}")
-    if l := desc.get("layout"):
+    if l := _as_str(desc.get("layout")):
         parts.append(f"**布局**: {l}")
-    if regions := desc.get("regions"):
+
+    regions = desc.get("regions") or []
+    if isinstance(regions, list) and regions:
         parts.append("**区块与控件**:")
         for r in regions:
-            n = r.get("name") or "(unnamed)"
-            controls = r.get("controls") or []
-            parts.append(f"- {n}")
-            for c in controls:
-                parts.append(f"  - {c}")
-    if anns := desc.get("annotations"):
+            if isinstance(r, dict):
+                n = _as_str(r.get("name")) or "(unnamed)"
+                controls = r.get("controls") or []
+                parts.append(f"- {n}")
+                if isinstance(controls, list):
+                    for c in controls:
+                        parts.append(f"  - {_as_str(c)}")
+                elif controls:
+                    parts.append(f"  - {_as_str(controls)}")
+            else:
+                parts.append(f"- {_as_str(r)}")
+
+    anns = desc.get("annotations") or []
+    if isinstance(anns, list) and anns:
         parts.append("**标注**:")
         for a in anns:
-            parts.append(
-                f"- {a.get('marker') or '?'} @ {a.get('location') or '?'} — {a.get('description') or ''}"
-            )
-    if n := desc.get("notes"):
+            if isinstance(a, dict):
+                marker = _as_str(a.get("marker")) or "?"
+                loc = _as_str(a.get("location")) or "?"
+                d = _as_str(a.get("description"))
+                parts.append(f"- {marker} @ {loc} — {d}")
+            else:
+                parts.append(f"- {_as_str(a)}")
+
+    if n := _as_str(desc.get("notes")):
         parts.append(f"**备注**: {n}")
     return "\n".join(parts)
 
@@ -160,22 +198,29 @@ class ScreenParser(BaseSheetParser):
 
             # Searchable text combines the rendered description with the
             # surrounding cell text — that's what the user is most likely
-            # to ask about.
+            # to ask about. We tolerate any malformed VL output here.
             combined_text_parts: list[str] = []
-            if title := desc.get("screen_title"):
-                combined_text_parts.append(title)
-            if layout := desc.get("layout"):
-                combined_text_parts.append(layout)
-            for r in desc.get("regions") or []:
-                if r.get("name"):
-                    combined_text_parts.append(r["name"])
-                for c in r.get("controls") or []:
-                    combined_text_parts.append(c)
-            for a in desc.get("annotations") or []:
-                if a.get("description"):
-                    combined_text_parts.append(a["description"])
+            if isinstance(desc, dict):
+                combined_text_parts.append(_as_str(desc.get("screen_title")))
+                combined_text_parts.append(_as_str(desc.get("layout")))
+                for r in desc.get("regions") or []:
+                    if isinstance(r, dict):
+                        combined_text_parts.append(_as_str(r.get("name")))
+                        ctrls = r.get("controls") or []
+                        if isinstance(ctrls, list):
+                            for c in ctrls:
+                                combined_text_parts.append(_as_str(c))
+                        else:
+                            combined_text_parts.append(_as_str(ctrls))
+                    else:
+                        combined_text_parts.append(_as_str(r))
+                for a in desc.get("annotations") or []:
+                    if isinstance(a, dict):
+                        combined_text_parts.append(_as_str(a.get("description")))
+                    else:
+                        combined_text_parts.append(_as_str(a))
             combined_text_parts.append(side_text)
-            text = " ".join(combined_text_parts)
+            text = " ".join(p for p in combined_text_parts if p)
 
             md = f"### {snap.name}\n\n{desc_md}\n\n---\n\n**画面周围文字**:\n\n{side_text}"
             chunks.append(ParsedChunk(
