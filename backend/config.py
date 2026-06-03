@@ -23,6 +23,8 @@ class Settings(BaseSettings):
 
     enable_multi_perspective: bool = True
     enable_vl_sheet_overview: bool = True
+    smart_screenshots: bool = True
+    max_cells_per_sheet: int = 20000
     recall_top_n: int = 30
     rerank_top_k: int = 5
 

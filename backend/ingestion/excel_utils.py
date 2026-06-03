@@ -192,12 +192,16 @@ def open_workbook(path: str | Path) -> Workbook:
     return load_workbook(filename=str(path), data_only=False, rich_text=True)
 
 
-def read_sheet(ws: Worksheet, index: int) -> SheetSnapshot:
+def read_sheet(ws: Worksheet, index: int, max_cells: int | None = None) -> SheetSnapshot:
     """Walk a sheet and return a SheetSnapshot.
 
     Empty cells (no value) are skipped to keep the snapshot compact.
     `infer_indent_levels` is called once at the end so each CellInfo
     knows its row's indent depth.
+
+    If `max_cells` is set and we accumulate more than that many
+    non-empty cells, we abort the walk early. The caller can detect
+    this via `len(cells) >= max_cells`.
     """
     merged_ranges = [str(r) for r in ws.merged_cells.ranges]
     merged_anchors: dict[tuple[int, int], str] = {}
@@ -205,7 +209,14 @@ def read_sheet(ws: Worksheet, index: int) -> SheetSnapshot:
         merged_anchors[(mr.min_row, mr.min_col)] = str(mr)
 
     cells: list[CellInfo] = []
+    aborted = False
     for row in ws.iter_rows():
+        if max_cells is not None and len(cells) >= max_cells:
+            logger.warning(
+                f"Sheet '{ws.title}' exceeded max_cells={max_cells}; truncating"
+            )
+            aborted = True
+            break
         for cell in row:
             text, runs = _cell_runs(cell)
             if not text and cell.fill is None:

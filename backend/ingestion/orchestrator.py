@@ -266,31 +266,79 @@ async def ingest_file(
                                             0, 1, extra={"document_id": doc_id}))
         await _emit(progress, ProgressEvent("reading", f"opening {filename}", 0, 1))
         wb = open_workbook(file_path)
-        snaps = [(idx, ws.title, read_sheet(ws, idx)) for idx, ws in enumerate(wb.worksheets)]
+        ws_list = list(wb.worksheets)
+        total_sheets = len(ws_list)
+        snaps: list = []
+        for idx, ws in enumerate(ws_list):
+            await _emit(progress, ProgressEvent(
+                "reading", f"sheet '{ws.title}' (rows={ws.max_row or 0}, cols={ws.max_column or 0})",
+                idx, total_sheets,
+            ))
+            snap = read_sheet(ws, idx, max_cells=settings.max_cells_per_sheet)
+            snaps.append((idx, ws.title, snap))
+            await _emit(progress, ProgressEvent(
+                "reading", f"'{ws.title}' parsed ({len(snap.cells)} cells)",
+                idx + 1, total_sheets,
+            ))
         wb.close()
-        total_sheets = len(snaps)
+
+        # ---- classification pass 1: rules only (no screenshots yet) ----
+        classifications = []
+        for i, (idx, name, snap) in enumerate(snaps):
+            r = await classify_sheet(snap, screenshot_path=None)
+            classifications.append((idx, name, snap, r))
+            await _emit(progress, ProgressEvent(
+                "classifying",
+                f"{name} → {r.sheet_type.value} ({r.confidence:.2f})",
+                i + 1, total_sheets,
+            ))
 
         # ---- screenshots ----
-        screenshots: dict[str, Path | None] = {}
-        for i, (_, name, _) in enumerate(snaps):
+        # In smart mode, only sheets whose parser actually consumes a
+        # screenshot get one rendered: cover (VL metadata), screen
+        # (image-anchor sheet), unknown/low-confidence (generic VL).
+        screenshots: dict[str, Path | None] = {name: None for _, name, _ in snaps}
+
+        def _needs_screenshot(stype: str, conf: float) -> bool:
+            if not settings.smart_screenshots:
+                return True
+            if stype in ("cover", "screen", "unknown"):
+                return True
+            if conf < 0.55:
+                return True
+            return False
+
+        to_render = [
+            (i, name) for i, (_, name, _, r) in enumerate(classifications)
+            if _needs_screenshot(r.sheet_type.value, r.confidence)
+        ]
+        for k, (_, name) in enumerate(to_render):
+            await _emit(progress, ProgressEvent(
+                "screenshot", f"rendering {name}…", k, len(to_render),
+            ))
             try:
-                shot = render_single_sheet(file_path, name, settings.screenshot_dir)
+                shot = await asyncio.to_thread(
+                    render_single_sheet, file_path, name, settings.screenshot_dir,
+                )
                 screenshots[name] = shot.file_path if shot else None
             except Exception as e:
                 logger.warning(f"Screenshot for '{name}' failed: {e}")
                 screenshots[name] = None
-            await _emit(progress, ProgressEvent("screenshot",
-                                                f"rendered {name}",
-                                                i + 1, total_sheets))
+            await _emit(progress, ProgressEvent(
+                "screenshot", f"rendered {name}", k + 1, len(to_render),
+            ))
 
-        # ---- classification ----
-        classifications = []
-        for i, (idx, name, snap) in enumerate(snaps):
-            r = await classify_sheet(snap, screenshot_path=screenshots[name])
-            classifications.append((idx, name, snap, r))
-            await _emit(progress, ProgressEvent("classifying",
-                                                f"{name} → {r.sheet_type.value} ({r.confidence:.2f})",
-                                                i + 1, total_sheets))
+        # ---- classification pass 2: VL fallback for low-confidence sheets ----
+        for i, (idx, name, snap, r) in enumerate(classifications):
+            if r.confidence >= 0.55 or screenshots[name] is None:
+                continue
+            r2 = await classify_sheet(snap, screenshot_path=screenshots[name])
+            classifications[i] = (idx, name, snap, r2)
+            await _emit(progress, ProgressEvent(
+                "classifying-vl",
+                f"{name} → {r2.sheet_type.value} ({r2.confidence:.2f}, vl)",
+                i + 1, total_sheets,
+            ))
 
         # ---- Pass 1: cover ----
         doc_meta: dict = {}

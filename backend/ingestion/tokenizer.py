@@ -1,13 +1,8 @@
 """Japanese-aware tokenizer for FTS5 indexing.
 
-Lindera (Rust under the hood) gives us MeCab-quality Japanese
-segmentation. For Chinese/English mixed-in content, Lindera falls back
-gracefully (Chinese characters get per-char tokens, English stays
-whitespace-split).
-
-Public:
-    tokenize(text)            -> list[str]
-    tokenize_for_fts(text)    -> space-joined string for FTS5 insert
+`lindera-python` exposes different APIs across versions. We probe them
+at import time and pick whichever works; if none do, we fall back to a
+character-level split that's good enough for mixed CJK queries.
 """
 
 from __future__ import annotations
@@ -16,42 +11,114 @@ from functools import lru_cache
 
 from loguru import logger
 
-try:
-    from lindera import Lindera           # lindera-python 3.x
-    _HAS_LINDERA = True
-except Exception as e:  # pragma: no cover
-    logger.warning(f"lindera not available, falling back to char-split: {e}")
-    Lindera = None
-    _HAS_LINDERA = False
+
+# ---------------------------------------------------------------------------
+# API probing
+# ---------------------------------------------------------------------------
+
+def _probe_tokenizer():
+    """Return a callable `tokenize(text) -> list[str]` or None.
+
+    We try the known lindera-python API surfaces in order; the first
+    successful probe wins.
+    """
+    # 3.x API: Tokenizer + Segmenter + load_dictionary
+    try:
+        from lindera import Tokenizer, Segmenter, load_dictionary  # type: ignore
+        dictionary = load_dictionary("ipadic")
+        segmenter = Segmenter("normal", dictionary)
+        tok = Tokenizer(segmenter)
+        def _t(text: str):
+            return [t.text for t in tok.tokenize(text)]
+        _t("試験")
+        logger.info("tokenizer: lindera 3.x (Tokenizer+Segmenter) ✓")
+        return _t
+    except Exception as e:
+        logger.debug(f"tokenizer probe (3.x A): {e}")
+
+    # 3.x alt: TokenizerConfigBuilder
+    try:
+        from lindera import TokenizerConfigBuilder, Tokenizer  # type: ignore
+        cfg = TokenizerConfigBuilder()
+        cfg.set_dictionary_kind("ipadic")
+        cfg.set_mode("normal")
+        tok = Tokenizer(cfg.build())
+        def _t(text: str):
+            return [t.text for t in tok.tokenize(text)]
+        _t("試験")
+        logger.info("tokenizer: lindera 3.x (TokenizerConfigBuilder) ✓")
+        return _t
+    except Exception as e:
+        logger.debug(f"tokenizer probe (3.x B): {e}")
+
+    # 2.x / 0.x API: Lindera class
+    try:
+        from lindera import Lindera  # type: ignore
+        tok = Lindera(dictionary="ipadic", mode="normal")
+        def _t(text: str):
+            return [t.text for t in tok.tokenize(text)]
+        _t("試験")
+        logger.info("tokenizer: lindera legacy (Lindera) ✓")
+        return _t
+    except Exception as e:
+        logger.debug(f"tokenizer probe (legacy): {e}")
+
+    # lindera_py module (older PyPI name)
+    try:
+        from lindera_py import Tokenizer  # type: ignore
+        tok = Tokenizer()
+        def _t(text: str):
+            return [t.text for t in tok.tokenize(text)]
+        _t("試験")
+        logger.info("tokenizer: lindera_py module ✓")
+        return _t
+    except Exception as e:
+        logger.debug(f"tokenizer probe (lindera_py): {e}")
+
+    logger.warning("no Lindera variant worked; using char-split fallback (Japanese FTS quality reduced)")
+    return None
 
 
 @lru_cache(maxsize=1)
-def _get_tokenizer():
-    if not _HAS_LINDERA:
-        return None
-    # ipadic = the standard Japanese dictionary; bundled in lindera-python
-    return Lindera(dictionary="ipadic", mode="normal")
+def _get_impl():
+    return _probe_tokenizer()
+
+
+def _fallback(text: str) -> list[str]:
+    out: list[str] = []
+    for piece in text.split():
+        if any("぀" <= ch <= "ヿ" or "一" <= ch <= "鿿" for ch in piece):
+            # split CJK char-by-char, keep ASCII pieces whole
+            cur: list[str] = []
+            buf = ""
+            for ch in piece:
+                is_cjk = "぀" <= ch <= "ヿ" or "一" <= ch <= "鿿"
+                if is_cjk:
+                    if buf:
+                        cur.append(buf)
+                        buf = ""
+                    cur.append(ch)
+                else:
+                    buf += ch
+            if buf:
+                cur.append(buf)
+            out.extend(cur)
+        else:
+            out.append(piece)
+    return out
 
 
 def tokenize(text: str) -> list[str]:
     if not text:
         return []
-    tk = _get_tokenizer()
-    if tk is None:
-        # Fallback: split on whitespace AND per-char for CJK
-        out: list[str] = []
-        for piece in text.split():
-            if any("　" <= ch <= "鿿" for ch in piece):
-                out.extend(list(piece))
-            else:
-                out.append(piece)
-        return out
+    impl = _get_impl()
+    if impl is None:
+        return _fallback(text)
     try:
-        tokens = tk.tokenize(text)
-        return [t.text for t in tokens if t.text.strip()]
+        return [t for t in impl(text) if t.strip()]
     except Exception as e:
-        logger.warning(f"lindera tokenize failed: {e}")
-        return text.split()
+        logger.warning(f"tokenize failed, falling back: {e}")
+        return _fallback(text)
 
 
 def tokenize_for_fts(text: str) -> str:
