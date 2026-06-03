@@ -15,7 +15,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from loguru import logger
 
-from api import health
+from api import debug, health
 from config import settings
 from db import init_db
 
@@ -35,6 +35,7 @@ def create_app() -> FastAPI:
     )
 
     app.include_router(health.router)
+    app.include_router(debug.router)
 
     @app.on_event("startup")
     async def _startup() -> None:
