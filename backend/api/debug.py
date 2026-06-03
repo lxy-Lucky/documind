@@ -14,6 +14,7 @@ from fastapi import APIRouter, File, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse
 
 from config import settings
+from ingestion.classifier import classify_sheet
 from ingestion.excel_utils import dump_markdown, dump_text, open_workbook, read_sheet
 from ingestion.image_extract import extract_sheet_images
 from ingestion.screenshot import render_single_sheet
@@ -112,6 +113,41 @@ async def inspect_screenshot(
         if not shot:
             raise HTTPException(404, f"Sheet '{sheet}' not found or render failed")
         return FileResponse(shot.file_path, media_type="image/png")
+    finally:
+        path.unlink(missing_ok=True)
+
+
+@router.post("/inspect/classify")
+async def inspect_classify(
+    file: UploadFile = File(...),
+    use_vl: bool = Query(False, description="render screenshot + run VL fallback on each sheet"),
+) -> dict:
+    """Classify every sheet in the uploaded workbook.
+
+    With use_vl=true, sheets that fall through the rule stack also get a
+    VL pass — slower (one extra Ollama call per ambiguous sheet) but
+    catches edge cases.
+    """
+    path = _save_upload(file)
+    try:
+        wb = open_workbook(path)
+        results = []
+        for idx, ws in enumerate(wb.worksheets):
+            snap = read_sheet(ws, idx)
+            shot = None
+            if use_vl:
+                shot_obj = render_single_sheet(path, ws.title, settings.screenshot_dir)
+                shot = shot_obj.file_path if shot_obj else None
+            r = await classify_sheet(snap, screenshot_path=shot)
+            results.append({
+                "sheet": snap.name,
+                "type": r.sheet_type.value,
+                "confidence": round(r.confidence, 3),
+                "used_vl": r.used_vl,
+                "reasons": r.reasons,
+            })
+        wb.close()
+        return {"file": file.filename, "classifications": results}
     finally:
         path.unlink(missing_ok=True)
 
