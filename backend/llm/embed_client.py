@@ -42,7 +42,15 @@ def _embed() -> TextEmbedding:
     with _embed_lock:
         if _embed_singleton is None:
             logger.info(f"Loading embedding model: {settings.embed_model} (first call, may download)")
-            _embed_singleton = TextEmbedding(model_name=settings.embed_model)
+            try:
+                _embed_singleton = TextEmbedding(model_name=settings.embed_model)
+            except ValueError as e:
+                supported = [m["model"] for m in TextEmbedding.list_supported_models()]
+                logger.error(
+                    f"Embedding model '{settings.embed_model}' not supported by FastEmbed. "
+                    f"Supported names: {supported}"
+                )
+                raise
             logger.info("Embedding model ready")
     return _embed_singleton
 

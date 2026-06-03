@@ -12,7 +12,7 @@ class Settings(BaseSettings):
     ollama_model_vl: str = "qwen3-vl:8b"
     ollama_timeout: int = 300
 
-    embed_model: str = "BAAI/bge-m3"
+    embed_model: str = "intfloat/multilingual-e5-large"
     reranker_model: str = "BAAI/bge-reranker-v2-m3"
 
     data_dir: Path = Path("./data")
