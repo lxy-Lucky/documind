@@ -24,20 +24,15 @@ router = APIRouter(prefix="/api/documents", tags=["documents"])
 
 
 # ---------------------------------------------------------------------------
-# Progress queues per document_id
+# Progress queues
+#
+# Keyed by int document_id once known, plus a "latest" string key that is
+# bound the instant a new upload arrives (so /progress/stream never 404s
+# in the brief window before the background task starts and obtains a
+# document_id).
 # ---------------------------------------------------------------------------
 
-_QUEUES: dict[int, asyncio.Queue[ProgressEvent]] = {}
-
-
-def _make_queue(doc_id: int) -> asyncio.Queue[ProgressEvent]:
-    q: asyncio.Queue[ProgressEvent] = asyncio.Queue()
-    _QUEUES[doc_id] = q
-    return q
-
-
-def _drop_queue(doc_id: int) -> None:
-    _QUEUES.pop(doc_id, None)
+_QUEUES: dict[int | str, asyncio.Queue[ProgressEvent]] = {}
 
 
 # ---------------------------------------------------------------------------
@@ -188,37 +183,22 @@ def get_sheet_screenshot(sheet_id: int):
 # Upload
 # ---------------------------------------------------------------------------
 
-async def _run_ingest(doc_path: Path, filename: str, folder_id: int, doc_id_holder: dict):
-    q = _make_queue(0)  # temp placeholder; will be reassigned after doc_id is known
-    try:
-        # We need the doc_id to register the queue properly. The orchestrator
-        # creates the document row internally, so let's instead pass `progress=q`
-        # and rely on the caller to subscribe before the file finishes parsing.
-        # To make it reliable, we pre-create the document row here.
-        pass
-    finally:
-        pass
-
-
 @router.post("/upload")
 async def upload(
     background: BackgroundTasks,
     file: UploadFile = File(...),
     folder_id: int = Form(...),
 ) -> dict:
-    """Save uploaded file, start ingestion in background, return document_id
-    immediately. Client should connect to /progress to follow."""
-    # 1. Verify folder
+    """Save uploaded file, start ingestion in background, register the
+    progress queue immediately under "latest" so /progress/stream can
+    subscribe before the runner starts."""
     with get_db() as conn:
         f = conn.execute("SELECT id FROM folder WHERE id=?", (folder_id,)).fetchone()
         if not f:
             raise HTTPException(404, "folder not found")
 
-    # 2. Persist file
+    # Persist upload
     suffix = Path(file.filename or "x.xlsx").suffix or ".xlsx"
-    dest = settings.upload_dir / f"{tempfile.mkstemp(suffix=suffix, dir=settings.upload_dir)[1]}"
-    # mkstemp opens a fd; close it before writing to be safe across platforms.
-    # Simpler: use NamedTemporaryFile.
     tmp = tempfile.NamedTemporaryFile(suffix=suffix, dir=settings.upload_dir, delete=False)
     try:
         shutil.copyfileobj(file.file, tmp)
@@ -226,26 +206,19 @@ async def upload(
         tmp.close()
     dest = Path(tmp.name)
 
-    # 3. Pre-create document row so we have an ID to bind the progress queue.
-    #    We then call ingest_file which would normally create the row itself —
-    #    to keep it simple, we pass a queue and let the caller correlate via
-    #    /progress?document_id=<latest>. The orchestrator emits doc_id in the
-    #    'done' event.
+    # Register queue *before* the background task runs.
     q: asyncio.Queue[ProgressEvent] = asyncio.Queue()
+    _QUEUES["latest"] = q
 
     async def runner():
         try:
             doc_id = await ingest_file(folder_id, dest, file.filename or dest.name, progress=q)
-            _QUEUES[doc_id] = q  # bind queue to doc_id only after creation
+            _QUEUES[doc_id] = q
         except Exception:
-            # already emitted "error" event; nothing else to do
+            # Orchestrator already emitted an 'error' event on the queue.
             pass
 
     background.add_task(runner)
-
-    # We cannot return the doc_id yet (orchestrator hasn't created it). Clients
-    # should subscribe to /progress/stream which streams events from the most
-    # recently started job.
     return {"status": "started", "filename": file.filename}
 
 
@@ -253,31 +226,21 @@ async def upload(
 async def progress_stream(document_id: int | None = None):
     """SSE stream of ingestion progress.
 
-    If document_id is provided, stream that document's queue (must exist).
-    Otherwise stream the most recently created queue (useful right after
-    POST /upload where the client hasn't learned the doc_id yet).
+    With document_id: stream that document's queue (404 if absent).
+    Without: stream the queue tied to the most recent /upload call.
     """
     if document_id is not None:
         q = _QUEUES.get(document_id)
-        if q is None:
-            raise HTTPException(404, "no progress queue for that document_id")
     else:
-        if not _QUEUES:
-            raise HTTPException(404, "no active ingestion jobs")
-        q = next(reversed(list(_QUEUES.values())))
+        q = _QUEUES.get("latest")
+    if q is None:
+        raise HTTPException(404, "no active ingestion job")
 
     async def gen():
-        try:
-            while True:
-                evt: ProgressEvent = await q.get()
-                yield {"event": evt.stage, "data": json.dumps(evt.to_dict(), ensure_ascii=False)}
-                if evt.stage in ("done", "error"):
-                    break
-        finally:
-            # Caller may keep polling for the next job; we don't auto-cleanup
-            # immediately. The orchestrator finishes after emitting 'done',
-            # the queue is drained, and Python GC handles it once nothing
-            # references it.
-            pass
+        while True:
+            evt: ProgressEvent = await q.get()
+            yield {"event": evt.stage, "data": json.dumps(evt.to_dict(), ensure_ascii=False)}
+            if evt.stage in ("done", "error"):
+                break
 
     return EventSourceResponse(gen())
