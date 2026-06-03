@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, ref, watch } from "vue";
+import { computed, nextTick, reactive, ref, watch } from "vue";
 import * as api from "@/api/client";
 import { state, errorBus } from "@/composables/store";
 import type { ChatMessage, Citation } from "@/types";
@@ -33,22 +33,27 @@ async function send() {
   if (!q || sending.value) return;
   question.value = "";
 
-  const userMsg: ChatMessage = {
+  state.messages.push({
     id: crypto.randomUUID(),
     role: "user",
     content: q,
     context_label: contextLabel.value,
-  };
-  state.messages.push(userMsg);
+  });
   await scrollDown();
 
-  const asst: ChatMessage = {
+  // IMPORTANT: wrap in `reactive()` BEFORE pushing so that subsequent
+  // mutations to `asst.content` go through the Vue proxy and trigger
+  // re-renders. Pushing a plain object and then mutating it directly
+  // bypasses reactivity (the array element becomes a fresh proxy whose
+  // underlying target is the original object — the original reference
+  // no longer routes through the proxy trap).
+  const asst = reactive<ChatMessage>({
     id: crypto.randomUUID(),
     role: "assistant",
     content: "",
     streaming: true,
     citations: [],
-  };
+  });
   state.messages.push(asst);
 
   sending.value = true;
