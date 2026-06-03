@@ -69,6 +69,20 @@ curl http://localhost:8000/api/health/deps   # 详细依赖检查
 
 `/api/health/deps` 会逐项报告：Ollama 是否可达、qa/vl 模型是否已 pull、sqlite-vec 扩展是否加载成功，方便排错。
 
+### 5. 前端
+
+```bash
+cd frontend
+npm install
+npm run dev    # http://localhost:5173 ，已经通过 vite 反代 /api 到 8000
+```
+
+生产构建：
+
+```bash
+npm run build  # 输出到 frontend/dist
+```
+
 ## 开发说明
 
 - 开发机不需要可运行环境，仅写代码；测试在 Linux 机器上跑。

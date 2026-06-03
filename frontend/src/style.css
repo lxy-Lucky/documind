@@ -1,0 +1,87 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: dark;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html, body, #app {
+  height: 100%;
+  margin: 0;
+  font-family: 'Noto Serif SC', serif;
+  background: #0a0b0f;
+  color: #eae6de;
+  -webkit-font-smoothing: antialiased;
+}
+
+::-webkit-scrollbar { width: 4px; height: 4px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: #252738; border-radius: 10px; }
+::-webkit-scrollbar-thumb:hover { background: #5c5953; }
+
+/* Markdown answer styling */
+.md-answer h1, .md-answer h2, .md-answer h3 {
+  font-family: 'Syne', 'Noto Serif SC', serif;
+  font-weight: 700;
+  margin-top: 1em;
+  margin-bottom: 0.4em;
+  color: #eae6de;
+}
+.md-answer h1 { font-size: 1.3em; }
+.md-answer h2 { font-size: 1.15em; }
+.md-answer h3 { font-size: 1.05em; }
+.md-answer p { margin: 0.5em 0; line-height: 1.65; }
+.md-answer ul, .md-answer ol { margin: 0.5em 0; padding-left: 1.4em; }
+.md-answer li { line-height: 1.6; margin: 0.2em 0; }
+.md-answer strong { color: #e4a853; }
+.md-answer code {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.88em;
+  background: #1e2030;
+  padding: 1px 5px;
+  border-radius: 4px;
+  color: #e4a853;
+}
+.md-answer pre {
+  background: #171822;
+  border: 1px solid #252738;
+  border-radius: 7px;
+  padding: 10px 12px;
+  overflow-x: auto;
+  margin: 0.6em 0;
+}
+.md-answer pre code {
+  background: transparent;
+  padding: 0;
+  color: #eae6de;
+}
+.md-answer blockquote {
+  border-left: 2px solid #c48a3a;
+  padding-left: 0.8em;
+  color: #9e9a92;
+  margin: 0.6em 0;
+}
+.md-answer .cite {
+  display: inline-block;
+  background: rgba(228,168,83,0.12);
+  border: 1px solid rgba(228,168,83,0.22);
+  color: #e4a853;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.78em;
+  padding: 0 5px;
+  border-radius: 4px;
+  margin: 0 2px;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.md-answer .cite:hover {
+  background: rgba(228,168,83,0.22);
+  color: #fff;
+}
