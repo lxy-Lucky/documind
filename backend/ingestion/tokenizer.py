@@ -122,4 +122,24 @@ def tokenize(text: str) -> list[str]:
 
 
 def tokenize_for_fts(text: str) -> str:
+    """Tokens joined by spaces, used when *writing* to FTS5."""
     return " ".join(tokenize(text))
+
+
+def tokenize_for_fts_query(text: str) -> str:
+    """Tokens for an FTS5 MATCH query.
+
+    Each token is wrapped in double quotes so FTS5 treats it as a literal
+    phrase — this prevents special characters (-/+/:/^/AND/OR/NEAR) inside
+    user input (e.g. 'DBL-179', 'KAIZEN-2635') from being interpreted as
+    operators. Internal double-quotes are escaped per FTS5 spec.
+    """
+    out: list[str] = []
+    for t in tokenize(text):
+        t = t.strip()
+        if not t:
+            continue
+        # FTS5 escapes a double-quote inside a quoted phrase by doubling it.
+        escaped = t.replace('"', '""')
+        out.append(f'"{escaped}"')
+    return " ".join(out)

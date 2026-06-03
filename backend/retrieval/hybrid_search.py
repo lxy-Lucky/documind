@@ -28,7 +28,7 @@ from loguru import logger
 
 from config import settings
 from db import get_db
-from ingestion.tokenizer import tokenize_for_fts
+from ingestion.tokenizer import tokenize_for_fts_query
 from llm.embed_client import embed_texts_async, rerank_async, vector_to_blob
 
 
@@ -123,7 +123,7 @@ async def _vector_recall_summaries(query_vec: list[float], limit: int,
 def _fts_recall(query: str, limit: int,
                 folder_id: int | None,
                 document_id: int | None) -> list[tuple[int, float]]:
-    q_tok = tokenize_for_fts(query)
+    q_tok = tokenize_for_fts_query(query)
     if not q_tok.strip():
         return []
     scope_sql, params = _scope_clause(folder_id, document_id)
@@ -259,12 +259,30 @@ async def hybrid_search(
     vec_lists = await embed_texts_async([query])
     qvec = vec_lists[0]
 
-    # 2. Run all 4 recalls (vector ones go through to_thread inside the
-    #    embed/rerank clients; FTS and exact are sync but very fast).
-    vec_chunks = await _vector_recall_chunks(qvec, recall_n, folder_id, document_id)
-    vec_summary = await _vector_recall_summaries(qvec, recall_n, folder_id, document_id)
-    fts_hits = _fts_recall(query, recall_n, folder_id, document_id)
-    exact_hits = _exact_recall(query, recall_n, folder_id, document_id)
+    # 2. Run all 4 recalls. Each path is wrapped so a single failure
+    #    (e.g. FTS parse error, vec table empty) doesn't kill the chat.
+    async def _safe_async(name, coro):
+        try:
+            return await coro
+        except Exception as e:
+            logger.warning(f"recall path '{name}' failed: {e}")
+            return []
+
+    def _safe_sync(name, fn, *args):
+        try:
+            return fn(*args)
+        except Exception as e:
+            logger.warning(f"recall path '{name}' failed: {e}")
+            return []
+
+    vec_chunks = await _safe_async(
+        "vec_chunk", _vector_recall_chunks(qvec, recall_n, folder_id, document_id),
+    )
+    vec_summary = await _safe_async(
+        "vec_summary", _vector_recall_summaries(qvec, recall_n, folder_id, document_id),
+    )
+    fts_hits = _safe_sync("fts", _fts_recall, query, recall_n, folder_id, document_id)
+    exact_hits = _safe_sync("exact", _exact_recall, query, recall_n, folder_id, document_id)
 
     # 3. RRF
     fused = _rrf(vec_chunks, vec_summary, fts_hits, exact_hits)
