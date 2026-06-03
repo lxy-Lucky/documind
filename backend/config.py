@@ -36,7 +36,7 @@ class Settings(BaseSettings):
     ollama_timeout: int = 300
 
     embed_model: str = "intfloat/multilingual-e5-large"
-    reranker_model: str = "BAAI/bge-reranker-v2-m3"
+    reranker_model: str = "jinaai/jina-reranker-v2-base-multilingual"
 
     data_dir: Path = Path("./data")
     db_path: Path = Path("./data/documind.db")

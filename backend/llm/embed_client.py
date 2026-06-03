@@ -62,7 +62,15 @@ def _reranker() -> TextCrossEncoder:
     with _rerank_lock:
         if _rerank_singleton is None:
             logger.info(f"Loading reranker model: {settings.reranker_model} (first call, may download)")
-            _rerank_singleton = TextCrossEncoder(model_name=settings.reranker_model)
+            try:
+                _rerank_singleton = TextCrossEncoder(model_name=settings.reranker_model)
+            except ValueError:
+                supported = [m["model"] for m in TextCrossEncoder.list_supported_models()]
+                logger.error(
+                    f"Reranker model '{settings.reranker_model}' not supported by FastEmbed. "
+                    f"Supported names: {supported}"
+                )
+                raise
             logger.info("Reranker model ready")
     return _rerank_singleton
 
