@@ -6,17 +6,18 @@ For each parsed chunk, ask Qwen3-14B to produce three summaries:
     - business  : plain-language Chinese description of what this does
     - keywords  : multilingual keyword cloud (zh/ja/en aliases)
 
-These three summaries are embedded separately so a user query in any
-of three languages has multiple paths to hit the right chunk.
+We use a labeled-section format (TECHNICAL: / BUSINESS: / KEYWORDS:)
+instead of JSON because 14B models truncate / break JSON quotes on
+long outputs, especially with Japanese content. The section format is
+forgiving — even partial outputs salvage 1-2 perspectives.
 
 Configurable via `settings.enable_multi_perspective`; when off, the
-orchestrator skips this step and only embeds the chunk's own text.
+orchestrator skips this step.
 """
 
 from __future__ import annotations
 
 import asyncio
-import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -37,38 +38,86 @@ class ChunkSummaries:
     business: str
     keywords: str
 
+    def is_empty(self) -> bool:
+        return not (self.technical or self.business or self.keywords)
 
-async def _enrich_one(text: str) -> ChunkSummaries | None:
-    prompt = _PROMPT_TEMPLATE.replace("{CONTENT}", text[:3000])  # cap to keep prompt small
-    try:
-        raw = await ollama.chat(
-            [{"role": "user", "content": prompt}],
-            options={"temperature": 0.2, "num_predict": 600},
-        )
-    except Exception as e:
-        logger.warning(f"Enrichment LLM call failed: {e}")
-        return None
 
+# Section labels we expect, in order. The parser is tolerant of casing
+# / surrounding whitespace / colon/full-width-colon variations.
+_LABELS = ("TECHNICAL", "BUSINESS", "KEYWORDS")
+_LABEL_PAT = re.compile(
+    r"^\s*(TECHNICAL|BUSINESS|KEYWORDS|END)\s*[:：]?\s*$",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+
+def _parse_sections(raw: str) -> ChunkSummaries:
+    """Pull TECHNICAL / BUSINESS / KEYWORDS sections out of raw text."""
+    if not raw.strip():
+        return ChunkSummaries("", "", "")
+
+    # Strip any code fences the model may have wrapped output in.
     txt = raw.strip()
     if txt.startswith("```"):
         txt = re.sub(r"^```[a-zA-Z]*", "", txt).rstrip("`").strip()
+
+    sections: dict[str, str] = {}
+    cur_label: str | None = None
+    cur_buf: list[str] = []
+    for line in txt.splitlines():
+        m = _LABEL_PAT.match(line)
+        if m:
+            # Flush previous
+            if cur_label and cur_label != "END":
+                sections[cur_label] = "\n".join(cur_buf).strip()
+            cur_label = m.group(1).upper()
+            cur_buf = []
+            continue
+        if cur_label and cur_label != "END":
+            cur_buf.append(line)
+    # Flush trailing
+    if cur_label and cur_label != "END" and cur_label not in sections:
+        sections[cur_label] = "\n".join(cur_buf).strip()
+
+    return ChunkSummaries(
+        technical=sections.get("TECHNICAL", "").strip(),
+        business=sections.get("BUSINESS", "").strip(),
+        keywords=sections.get("KEYWORDS", "").strip(),
+    )
+
+
+async def _enrich_one(text: str, attempt: int = 1) -> ChunkSummaries | None:
+    """Call the LLM and parse. Retries once on empty / fully-blank output."""
+    prompt = _PROMPT_TEMPLATE.replace("{CONTENT}", text[:2500])
     try:
-        obj = json.loads(txt)
-        return ChunkSummaries(
-            technical=str(obj.get("technical", "")).strip(),
-            business=str(obj.get("business", "")).strip(),
-            keywords=str(obj.get("keywords", "")).strip(),
+        raw = await ollama.chat(
+            [{"role": "user", "content": prompt}],
+            options={
+                "temperature": 0.2,
+                "num_predict": 1200,  # plenty of room for 3 paragraphs of Japanese
+            },
         )
     except Exception as e:
-        logger.warning(f"Enrichment JSON parse failed: {e}, raw: {raw[:200]!r}")
+        logger.warning(f"Enrichment LLM call failed (attempt {attempt}): {e}")
         return None
+
+    summaries = _parse_sections(raw)
+    if summaries.is_empty():
+        if attempt < 2:
+            logger.warning(
+                f"Enrichment empty output (attempt {attempt}); retrying. raw[:120]: {raw[:120]!r}"
+            )
+            return await _enrich_one(text, attempt=attempt + 1)
+        logger.warning(f"Enrichment empty after retry; raw[:120]: {raw[:120]!r}")
+        return None
+    return summaries
 
 
 async def enrich_chunks(texts: list[str], concurrency: int = 2) -> list[ChunkSummaries | None]:
     """Enrich a list of chunk texts with bounded concurrency.
 
-    Ollama with a 14B model is single-batch; running 2 in parallel keeps
-    GPU saturated without queueing too much. Tune if needed.
+    Ollama with a 14B model handles one inference at a time per GPU;
+    keeping concurrency low avoids queue stalls.
     """
     if not settings.enable_multi_perspective:
         return [None] * len(texts)
