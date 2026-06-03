@@ -16,7 +16,7 @@ pdf2image==1.17.0
 # NLP / Search
 fastembed==0.4.2
 sqlite-vec==0.1.6
-lindera-py==0.42.2
+lindera-python==3.0.7
 
 # LLM
 ollama==0.4.4

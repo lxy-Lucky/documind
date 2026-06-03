@@ -9,7 +9,7 @@ class Settings(BaseSettings):
 
     ollama_host: str = "http://localhost:11434"
     ollama_model_qa: str = "qwen3:14b"
-    ollama_model_vl: str = "qwen2.5vl:7b"
+    ollama_model_vl: str = "qwen3-vl:8b"
     ollama_timeout: int = 300
 
     embed_model: str = "BAAI/bge-m3"

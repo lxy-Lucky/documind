@@ -5,7 +5,7 @@
 ## 架构概览
 
 - **后端**：Python 3.12 + FastAPI + SQLite (sqlite-vec + FTS5)
-- **LLM**：本地 Ollama，Qwen3-14B（问答）+ Qwen2.5-VL-7B（视觉）
+- **LLM**：本地 Ollama，Qwen3-14B（问答）+ Qwen3-VL-8B（视觉）
 - **Embedding**：BGE-M3（通过 FastEmbed）
 - **Reranker**：bge-reranker-v2-m3
 - **分词**：Lindera（日语为主，多语言兼容）
@@ -44,7 +44,7 @@ sudo apt-get install -y python3.12 python3.12-venv
 ```bash
 # 假设 Ollama 已安装并运行 (http://localhost:11434)
 ollama pull qwen3:14b
-ollama pull qwen2.5vl:7b
+ollama pull qwen3-vl:8b
 ```
 
 ### 3. 后端
