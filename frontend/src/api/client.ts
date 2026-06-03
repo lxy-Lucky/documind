@@ -54,6 +54,12 @@ export function subscribeProgress(
   const url = `/api/documents/progress/stream${document_id != null ? `?document_id=${document_id}` : ""}`;
   fetchEventSource(url, {
     signal: ctrl.signal,
+    openWhenHidden: true,
+    async onopen(resp) {
+      if (!resp.ok) {
+        throw new Error(`progress stream ${resp.status}: ${await resp.text()}`);
+      }
+    },
     onmessage(ev) {
       let data: any = {};
       try { data = JSON.parse(ev.data); } catch {}
@@ -103,6 +109,12 @@ export function streamChat(
       document_id: scope.document_id ?? null,
     }),
     signal: ctrl.signal,
+    openWhenHidden: true,        // don't pause if tab loses focus
+    async onopen(resp) {
+      if (!resp.ok) {
+        throw new Error(`chat opened with ${resp.status}: ${await resp.text()}`);
+      }
+    },
     onmessage(ev) {
       if (ev.event === "hits") {
         try { callbacks.onHits(JSON.parse(ev.data)); } catch {}
@@ -120,8 +132,10 @@ export function streamChat(
       }
     },
     onerror(err) {
+      // Returning a value from onerror suppresses the default retry loop.
       callbacks.onError(String(err));
-      throw err;
+      ctrl.abort();
+      throw err;   // ← throwing prevents the library from retrying
     },
   });
   return () => ctrl.abort();

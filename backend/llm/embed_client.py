@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import struct
-from functools import lru_cache
+import threading
 from typing import Iterable
 
 import numpy as np
@@ -26,17 +26,44 @@ from config import settings
 
 EMBED_DIM = 1024   # BGE-M3 dense dimension
 
+# Concurrent calls during the first load would each kick off a separate
+# download of the ~2GB model. We serialize behind a lock and cache the
+# instance for the whole process lifetime.
+_embed_singleton: TextEmbedding | None = None
+_rerank_singleton: TextCrossEncoder | None = None
+_embed_lock = threading.Lock()
+_rerank_lock = threading.Lock()
 
-@lru_cache(maxsize=1)
+
 def _embed() -> TextEmbedding:
-    logger.info(f"Loading embedding model: {settings.embed_model}")
-    return TextEmbedding(model_name=settings.embed_model)
+    global _embed_singleton
+    if _embed_singleton is not None:
+        return _embed_singleton
+    with _embed_lock:
+        if _embed_singleton is None:
+            logger.info(f"Loading embedding model: {settings.embed_model} (first call, may download)")
+            _embed_singleton = TextEmbedding(model_name=settings.embed_model)
+            logger.info("Embedding model ready")
+    return _embed_singleton
 
 
-@lru_cache(maxsize=1)
 def _reranker() -> TextCrossEncoder:
-    logger.info(f"Loading reranker model: {settings.reranker_model}")
-    return TextCrossEncoder(model_name=settings.reranker_model)
+    global _rerank_singleton
+    if _rerank_singleton is not None:
+        return _rerank_singleton
+    with _rerank_lock:
+        if _rerank_singleton is None:
+            logger.info(f"Loading reranker model: {settings.reranker_model} (first call, may download)")
+            _rerank_singleton = TextCrossEncoder(model_name=settings.reranker_model)
+            logger.info("Reranker model ready")
+    return _rerank_singleton
+
+
+def warmup() -> None:
+    """Eagerly load both models. Call from startup so the first
+    user-facing request doesn't pay the download/load tax."""
+    _embed()
+    _reranker()
 
 
 def embed_texts(texts: list[str]) -> list[list[float]]:

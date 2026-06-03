@@ -15,9 +15,12 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from loguru import logger
 
+import asyncio
+
 from api import chat, debug, documents, folders, health
 from config import settings
 from db import init_db
+from llm import embed_client
 
 
 def create_app() -> FastAPI:
@@ -44,6 +47,12 @@ def create_app() -> FastAPI:
     async def _startup() -> None:
         init_db()
         logger.info(f"DocuMind backend listening on {settings.host}:{settings.port}")
+        # Pre-warm BGE-M3 + reranker in a thread so the HTTP port can serve
+        # /api/health immediately even while the models are downloading.
+        async def _warm():
+            await asyncio.to_thread(embed_client.warmup)
+            logger.info("Models warmed up; retrieval ready.")
+        asyncio.create_task(_warm())
 
     return app
 
