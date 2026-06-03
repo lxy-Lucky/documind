@@ -47,6 +47,14 @@ class Settings(BaseSettings):
     enable_multi_perspective: bool = True
     enrich_concurrency: int = 4
     enrich_min_chars: int = 80
+    # Rows per chunk when ingesting tabular sheets (data dictionaries etc).
+    # Lower = finer-grained chunks but more of them; higher = fewer chunks
+    # but each chunk carries more content. 15-25 is a good range.
+    table_batch_size: int = 20
+    # Run enrichment AFTER the document is marked queryable. Lets users
+    # start asking questions as soon as embedding finishes; summaries
+    # backfill in the background.
+    background_enrichment: bool = True
     enable_vl_sheet_overview: bool = True
     smart_screenshots: bool = True
     max_cells_per_sheet: int = 20000

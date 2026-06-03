@@ -32,6 +32,10 @@ class ParsedChunk:
     metadata: dict[str, Any] = field(default_factory=dict)
     hierarchy_path: str = ""                     # e.g. '工事→予算反映 > ダイビル'
     order: int = 0                               # ordering within the sheet
+    # Whether this chunk benefits from multi-perspective enrichment.
+    # Structural chunks (table rows, change-log entries) are already
+    # keyword-dense; enrichment adds little but costs an LLM call per chunk.
+    enrich_eligible: bool = True
 
 
 @dataclass

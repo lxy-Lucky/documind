@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import re
 
+from config import settings
 from ingestion.excel_utils import CellInfo, SheetSnapshot
 from ingestion.parsers.base import (
     BaseSheetParser,
@@ -85,19 +86,14 @@ class TableParser(BaseSheetParser):
             if c.row > header_idx:
                 rows.setdefault(c.row, []).append(c)
 
-        chunks: list[ParsedChunk] = []
+        # First pass: materialize all populated rows into structured records.
+        records: list[tuple[int, dict[str, str], dict[int, str]]] = []
         dict_rows: list[DataDictRow] = []
-        order = 0
-        # Carry-forward for cells "inherited" from the row above when the
-        # current row leaves them blank (common in 結合 / 合并表头模式).
         last_values: dict[int, str] = {}
-
         for row_idx in sorted(rows):
             cells = sorted(rows[row_idx], key=lambda x: x.col)
+            row_values_by_col: dict[int, str] = {c.col: c.text for c in cells}
             record: dict[str, str] = {}
-            row_values_by_col: dict[int, str] = {}
-            for c in cells:
-                row_values_by_col[c.col] = c.text
             for col, hdr in header_text.items():
                 val = row_values_by_col.get(col, "")
                 if not val and col in last_values:
@@ -105,37 +101,64 @@ class TableParser(BaseSheetParser):
                 if val:
                     last_values[col] = val
                 record[hdr] = val
-
-            # Skip rows whose all-non-header values are empty
             if not any(record.values()):
                 continue
+            records.append((row_idx, record, row_values_by_col.copy()))
 
-            # ---- Data-dict structured output ----
+            # Structured data-dict row (independent of chunking — always per row)
             if is_data_dict:
                 dd = DataDictRow()
                 for col, field_name in dict_field_map.items():
-                    setattr(dd, field_name, row_values_by_col.get(col) or last_values.get(col, "") or "")
+                    setattr(dd, field_name,
+                            row_values_by_col.get(col) or last_values.get(col, "") or "")
                 if dd.column_name or dd.column_name_en:
                     dict_rows.append(dd)
 
-            # ---- Chunk per row ----
-            kv_lines = [f"- **{k}**: {v}" for k, v in record.items() if v]
-            md = f"### {snap.name} — 行 {row_idx}\n" + "\n".join(kv_lines)
-            text = " ; ".join(f"{k}: {v}" for k, v in record.items() if v)
+        # Second pass: batch records into chunks of `table_batch_size`,
+        # with 1 row of overlap so a query landing on a boundary still
+        # has neighborhood context.
+        batch_size = max(1, settings.table_batch_size)
+        overlap = 1 if batch_size > 4 else 0
+
+        chunks: list[ParsedChunk] = []
+        order = 0
+        i = 0
+        while i < len(records):
+            slice_ = records[i : i + batch_size]
+            if not slice_:
+                break
+
+            row_min = slice_[0][0]
+            row_max = slice_[-1][0]
+            md_lines: list[str] = [
+                f"### {snap.name} — 行 {row_min}–{row_max}",
+                "",
+                "| " + " | ".join(header_text.values()) + " |",
+                "| " + " | ".join("---" for _ in header_text) + " |",
+            ]
+            text_parts: list[str] = []
+            for _, record, _ in slice_:
+                vals = [record.get(h, "") for h in header_text.values()]
+                md_lines.append("| " + " | ".join(v.replace("\n", " ") for v in vals) + " |")
+                text_parts.append(" ; ".join(f"{k}: {v}" for k, v in record.items() if v))
+
             chunks.append(ParsedChunk(
-                text=text,
-                markdown=md,
+                text="\n".join(text_parts),
+                markdown="\n".join(md_lines),
                 metadata={
-                    "kind": "table_row",
+                    "kind": "table_batch",
                     "sheet": snap.name,
-                    "row": row_idx,
+                    "row_range": [row_min, row_max],
+                    "row_count": len(slice_),
                     "headers": list(header_text.values()),
                     "is_data_dict": is_data_dict,
                     "jira_tags": ctx.document_metadata.get("jira_codes", []),
                 },
                 hierarchy_path=snap.name,
                 order=order,
+                enrich_eligible=False,   # tabular records — already keyword dense
             ))
             order += 1
+            i += batch_size - overlap
 
         return ParserOutput(chunks=chunks, data_dict_rows=dict_rows)

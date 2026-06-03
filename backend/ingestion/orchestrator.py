@@ -71,6 +71,49 @@ async def _emit(q, evt: ProgressEvent) -> None:
     logger.info(f"[{evt.stage}] {evt.message} ({evt.current}/{evt.total})")
 
 
+# Holds the parsed-chunk lists per document during the ingestion call,
+# so we can look up `enrich_eligible` flags after writing chunks to DB.
+# Cleared once enrichment scheduling completes.
+_parser_outputs_by_doc: dict[int, list[list]] = {}
+
+
+async def _background_enrich(doc_id: int, chunk_ids: list[int], texts: list[str]) -> None:
+    """Run enrichment + summary embedding + FTS writes after the main
+    pipeline has already marked the document ready. Failure here is
+    non-fatal — the document remains queryable, just without summary
+    expansion."""
+    _set_enrich_status(doc_id, "running")
+    try:
+        logger.info(f"[bg-enrich doc={doc_id}] starting on {len(chunk_ids)} chunks")
+        summaries = await enrich_chunks(texts)
+        summary_rows = _insert_summaries(chunk_ids, summaries)
+        if not summary_rows:
+            logger.info(f"[bg-enrich doc={doc_id}] no summaries produced")
+            _set_enrich_status(doc_id, "done")
+            return
+        summary_texts = [r[2] for r in summary_rows]
+        summary_vecs = await embed_texts_async(summary_texts)
+        _write_embeddings([], [], summary_rows, summary_vecs)
+        # Append to FTS so they participate in BM25 too
+        with get_db() as conn:
+            for sid, _, text in summary_rows:
+                conn.execute(
+                    "INSERT INTO chunk_fts(rowid, fts_text) VALUES (?, ?)",
+                    (sid + 10_000_000, _tok_for_fts(text)),
+                )
+            conn.commit()
+        _set_enrich_status(doc_id, "done")
+        logger.info(f"[bg-enrich doc={doc_id}] completed ({len(summary_rows)} summaries)")
+    except Exception as e:
+        logger.exception(f"[bg-enrich doc={doc_id}] failed: {e}")
+        _set_enrich_status(doc_id, "failed")
+
+
+def _tok_for_fts(text: str) -> str:
+    from ingestion.tokenizer import tokenize_for_fts
+    return tokenize_for_fts(text)
+
+
 # ---------------------------------------------------------------------------
 # DB write helpers (sync — sqlite is fast enough)
 # ---------------------------------------------------------------------------
@@ -98,6 +141,12 @@ def _set_doc_status(doc_id: int, status: str, error: str | None = None) -> None:
                 "UPDATE document SET status=?, error_msg=? WHERE id=?",
                 (status, error, doc_id),
             )
+        conn.commit()
+
+
+def _set_enrich_status(doc_id: int, status: str) -> None:
+    with get_db() as conn:
+        conn.execute("UPDATE document SET enrich_status=? WHERE id=?", (status, doc_id))
         conn.commit()
 
 
@@ -210,6 +259,8 @@ def _insert_summaries(chunk_ids: list[int], summaries: list) -> list[tuple[int, 
 def _write_embeddings(chunk_ids: list[int], chunk_vecs: list[list[float]],
                       summary_rows: list[tuple[int, str, str]],
                       summary_vecs: list[list[float]]) -> None:
+    if not chunk_ids and not summary_rows:
+        return
     with get_db() as conn:
         for cid, vec in zip(chunk_ids, chunk_vecs):
             conn.execute(
@@ -226,6 +277,8 @@ def _write_embeddings(chunk_ids: list[int], chunk_vecs: list[list[float]],
 
 def _write_fts(chunk_ids: list[int], chunk_texts: list[str],
                summary_rows: list[tuple[int, str, str]]) -> None:
+    if not chunk_ids and not summary_rows:
+        return
     """Insert into chunk_fts. We index both chunk text and each summary
     in the same FTS table but use a rowid offset for summaries (negative
     is not allowed, so we encode: rowid = chunk_id for chunks, and
@@ -395,46 +448,72 @@ async def ingest_file(
             _insert_data_dict(doc_id, sheet_id, out)
             all_chunk_ids.extend(chunk_ids)
             all_chunk_texts.extend(c.text for c in out.chunks)
+            _parser_outputs_by_doc.setdefault(doc_id, []).append(list(out.chunks))
 
         if not all_chunk_ids:
             await _emit(progress, ProgressEvent("done",
                                                 "no chunks produced — document indexed empty",
                                                 1, 1))
             _set_doc_status(doc_id, "ready")
+            _set_enrich_status(doc_id, "skipped")
             return doc_id
 
-        # ---- enrichment ----
-        await _emit(progress, ProgressEvent("enriching",
-                                            "generating multi-perspective summaries",
-                                            0, len(all_chunk_ids)))
-
-        async def _enrich_progress(done: int, total: int) -> None:
-            # Throttle: only emit every 5 chunks (or last one) to keep
-            # the SSE channel readable.
-            if done == total or done % 5 == 0:
-                await _emit(progress, ProgressEvent(
-                    "enriching", f"summarized {done}/{total}", done, total,
-                ))
-
-        summaries = await enrich_chunks(all_chunk_texts, on_progress=_enrich_progress)
-        summary_rows = _insert_summaries(all_chunk_ids, summaries)
-
-        # ---- embedding ----
+        # ---- embedding (chunk text only — summaries handled later) ----
         await _emit(progress, ProgressEvent("embedding",
                                             "encoding chunks", 0, len(all_chunk_ids)))
         chunk_vecs = await embed_texts_async(all_chunk_texts)
-        summary_texts = [r[2] for r in summary_rows]
-        summary_vecs = await embed_texts_async(summary_texts) if summary_texts else []
-        _write_embeddings(all_chunk_ids, chunk_vecs, summary_rows, summary_vecs)
+        _write_embeddings(all_chunk_ids, chunk_vecs, [], [])
 
-        # ---- FTS ----
+        # ---- FTS (chunk text only — summaries appended later by enrichment) ----
         await _emit(progress, ProgressEvent("indexing", "writing FTS", 0, 1))
-        _write_fts(all_chunk_ids, all_chunk_texts, summary_rows)
+        _write_fts(all_chunk_ids, all_chunk_texts, [])
 
+        # The document is now queryable. Mark it ready immediately so the
+        # user can start chatting — enrichment runs in the background.
         _set_doc_status(doc_id, "ready")
-        await _emit(progress, ProgressEvent("done",
-                                            f"ingested {len(all_chunk_ids)} chunks",
-                                            1, 1, extra={"document_id": doc_id}))
+
+        # Collect ids of chunks that opted in to enrichment.
+        enrich_eligible_ids: list[int] = []
+        enrich_eligible_texts: list[str] = []
+        offset = 0
+        for parser_chunks in _parser_outputs_by_doc.get(doc_id, []):
+            for c in parser_chunks:
+                if c.enrich_eligible:
+                    enrich_eligible_ids.append(all_chunk_ids[offset])
+                    enrich_eligible_texts.append(all_chunk_texts[offset])
+                offset += 1
+
+        if not settings.enable_multi_perspective or not enrich_eligible_ids:
+            _set_enrich_status(doc_id, "skipped")
+            await _emit(progress, ProgressEvent(
+                "done",
+                f"ingested {len(all_chunk_ids)} chunks (enrichment skipped)",
+                1, 1, extra={"document_id": doc_id, "enrich": "skipped"},
+            ))
+            return doc_id
+
+        await _emit(progress, ProgressEvent(
+            "done",
+            f"ingested {len(all_chunk_ids)} chunks; enriching {len(enrich_eligible_ids)} in background",
+            1, 1,
+            extra={
+                "document_id": doc_id,
+                "enrich": "scheduled",
+                "enrich_count": len(enrich_eligible_ids),
+            },
+        ))
+
+        # Drop the per-doc parser output cache to free memory.
+        _parser_outputs_by_doc.pop(doc_id, None)
+
+        if settings.background_enrichment:
+            asyncio.create_task(
+                _background_enrich(doc_id, enrich_eligible_ids, enrich_eligible_texts)
+            )
+        else:
+            # Caller wants synchronous (mostly for debugging / batch jobs)
+            await _background_enrich(doc_id, enrich_eligible_ids, enrich_eligible_texts)
+
         return doc_id
 
     except Exception as e:

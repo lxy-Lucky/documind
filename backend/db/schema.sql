@@ -23,6 +23,7 @@ CREATE TABLE IF NOT EXISTS document (
     file_size     INTEGER,
     doc_metadata  TEXT,                       -- JSON: jira/customer/module/version extracted from cover
     status        TEXT DEFAULT 'pending',     -- pending/parsing/indexing/ready/failed
+    enrich_status TEXT DEFAULT 'pending',     -- pending/running/done/skipped
     error_msg     TEXT,
     uploaded_at   TEXT DEFAULT (datetime('now')),
     indexed_at    TEXT

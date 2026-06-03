@@ -66,6 +66,7 @@ class HistoryParser(BaseSheetParser):
                 },
                 hierarchy_path="変更履歴",
                 order=order,
+                enrich_eligible=False,   # one-line entries; not worth a 14B call
             ))
             order += 1
 

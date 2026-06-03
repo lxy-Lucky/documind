@@ -42,8 +42,8 @@ _QUEUES: dict[int | str, asyncio.Queue[ProgressEvent]] = {}
 @router.get("")
 def list_documents(folder_id: int | None = None) -> list[dict]:
     sql = """
-        SELECT d.id, d.folder_id, d.filename, d.file_size, d.status, d.uploaded_at,
-               d.indexed_at, d.error_msg, d.doc_metadata,
+        SELECT d.id, d.folder_id, d.filename, d.file_size, d.status, d.enrich_status,
+               d.uploaded_at, d.indexed_at, d.error_msg, d.doc_metadata,
                (SELECT COUNT(*) FROM chunk c WHERE c.document_id = d.id) AS chunk_count
         FROM document d
         WHERE 1=1

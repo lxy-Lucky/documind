@@ -49,6 +49,15 @@ def init_db() -> None:
     schema_path = Path(__file__).parent / "schema.sql"
     with get_db() as conn:
         conn.executescript(schema_path.read_text(encoding="utf-8"))
+        # Idempotent column additions for existing DBs upgrading in place.
+        # (SQLite supports ALTER TABLE ADD COLUMN; we ignore "duplicate column" errors.)
+        for stmt in (
+            "ALTER TABLE document ADD COLUMN enrich_status TEXT DEFAULT 'pending'",
+        ):
+            try:
+                conn.execute(stmt)
+            except Exception:
+                pass
         # vec0 virtual table cannot be created via plain CREATE TABLE IF NOT EXISTS
         # inside schema.sql reliably across versions; do it here.
         conn.execute(
