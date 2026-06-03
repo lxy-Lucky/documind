@@ -113,19 +113,48 @@ async def _enrich_one(text: str, attempt: int = 1) -> ChunkSummaries | None:
     return summaries
 
 
-async def enrich_chunks(texts: list[str], concurrency: int = 2) -> list[ChunkSummaries | None]:
+async def enrich_chunks(
+    texts: list[str],
+    concurrency: int | None = None,
+    on_progress=None,
+) -> list[ChunkSummaries | None]:
     """Enrich a list of chunk texts with bounded concurrency.
 
-    Ollama with a 14B model handles one inference at a time per GPU;
-    keeping concurrency low avoids queue stalls.
+    - Skips chunks shorter than `settings.enrich_min_chars` (not worth
+      the LLM call; one-line table rows or short headers).
+    - `on_progress(done, total)` is called whenever one chunk finishes,
+      so the orchestrator can stream live progress to the UI.
     """
     if not settings.enable_multi_perspective:
         return [None] * len(texts)
 
+    concurrency = concurrency or settings.enrich_concurrency
     sem = asyncio.Semaphore(concurrency)
+    total = len(texts)
+    done = 0
+    lock = asyncio.Lock()
 
-    async def _bounded(t: str) -> ChunkSummaries | None:
-        async with sem:
-            return await _enrich_one(t)
+    async def _bounded(i: int, t: str) -> tuple[int, ChunkSummaries | None]:
+        nonlocal done
+        try:
+            if len(t.strip()) < settings.enrich_min_chars:
+                return i, None
+            async with sem:
+                r = await _enrich_one(t)
+            return i, r
+        finally:
+            async with lock:
+                done += 1
+                if on_progress:
+                    try:
+                        await on_progress(done, total)
+                    except Exception:
+                        pass
 
-    return await asyncio.gather(*(_bounded(t) for t in texts))
+    pairs = await asyncio.gather(
+        *(_bounded(i, t) for i, t in enumerate(texts))
+    )
+    out: list[ChunkSummaries | None] = [None] * len(texts)
+    for i, s in pairs:
+        out[i] = s
+    return out

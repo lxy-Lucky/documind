@@ -22,6 +22,8 @@ class Settings(BaseSettings):
     image_dir: Path = Path("./data/images")
 
     enable_multi_perspective: bool = True
+    enrich_concurrency: int = 4
+    enrich_min_chars: int = 80
     enable_vl_sheet_overview: bool = True
     smart_screenshots: bool = True
     max_cells_per_sheet: int = 20000

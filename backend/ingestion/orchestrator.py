@@ -405,9 +405,18 @@ async def ingest_file(
 
         # ---- enrichment ----
         await _emit(progress, ProgressEvent("enriching",
-                                            f"generating multi-perspective summaries",
+                                            "generating multi-perspective summaries",
                                             0, len(all_chunk_ids)))
-        summaries = await enrich_chunks(all_chunk_texts)
+
+        async def _enrich_progress(done: int, total: int) -> None:
+            # Throttle: only emit every 5 chunks (or last one) to keep
+            # the SSE channel readable.
+            if done == total or done % 5 == 0:
+                await _emit(progress, ProgressEvent(
+                    "enriching", f"summarized {done}/{total}", done, total,
+                ))
+
+        summaries = await enrich_chunks(all_chunk_texts, on_progress=_enrich_progress)
         summary_rows = _insert_summaries(all_chunk_ids, summaries)
 
         # ---- embedding ----
